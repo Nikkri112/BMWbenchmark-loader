@@ -92,22 +92,68 @@ namespace BMWBenchmarkLoader
 
         void WaitMainMenu()
         {
-            var deadline = DateTime.UtcNow.AddMinutes(3);
+            var deadline = DateTime.UtcNow.AddMinutes(4);
+            bool pressedAnyKey = false;
             while (DateTime.UtcNow < deadline)
             {
-                Thread.Sleep(5000);
+                Thread.Sleep(3000);
                 var hwnd = UiDriver.GetGameWindow("b1-Win64-Shipping");
                 if (hwnd == IntPtr.Zero) continue;
                 try
                 {
                     var png = ScreenCaptor.Capture(hwnd, Path.Combine(_workDir, "probe_menu.png"));
                     var text = OcrRunner.WordsToText(OcrRunner.RunWords(png, _workDir));
+                    var norm = Norm(text);
+
                     if (IsMainMenu(text))
                         return;
+
+                    // экран «Нажмите любую клавишу» / Press Any Key
+                    if (IsPressAnyKey(norm, text))
+                    {
+                        Console.WriteLine("  [menu] экран «нажмите любую клавишу» — жмём Space/Enter");
+                        UiDriver.PressAnyKey(hwnd);
+                        pressedAnyKey = true;
+                        Thread.Sleep(1500);
+                        continue;
+                    }
+
+                    // пока меню не видно — периодически жмём клавишу (на случай если OCR не прочитал подпись)
+                    if (!pressedAnyKey)
+                    {
+                        Console.WriteLine("  [menu] меню ещё не видно, пробуем Space/Enter...");
+                        UiDriver.PressAnyKey(hwnd);
+                        pressedAnyKey = true;
+                        Thread.Sleep(1500);
+                    }
+                    else if ((DateTime.UtcNow.Second % 10) < 3)
+                    {
+                        // повторно раз в ~10 сек
+                        UiDriver.PressAnyKey(hwnd);
+                        Thread.Sleep(500);
+                    }
                 }
                 catch { }
             }
-            throw new Exception("Главное меню не обнаружено за 3 минуты");
+            throw new Exception("Главное меню не обнаружено за 4 минуты");
+        }
+
+        static bool IsPressAnyKey(string norm, string raw)
+        {
+            if (norm.Contains("нажмителюбую") || norm.Contains("нажмилюбую"))
+                return true;
+            if (norm.Contains("любуюклавиш") || norm.Contains("любуюкнопк"))
+                return true;
+            if (norm.Contains("pressany") || norm.Contains("press any"))
+                return true;
+            if (norm.Contains("anykey") || norm.Contains("any key"))
+                return true;
+            var lower = (raw ?? "").ToLowerInvariant();
+            if (lower.Contains("нажмите") && (lower.Contains("клавиш") || lower.Contains("кнопк")))
+                return true;
+            if (lower.Contains("press") && lower.Contains("key"))
+                return true;
+            return false;
         }
 
         void ClickMenuBench()

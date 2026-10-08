@@ -9,8 +9,17 @@ namespace BMWBenchmarkLoader
         [DllImport("user32.dll")] static extern bool SetForegroundWindow(IntPtr hWnd);
         [DllImport("user32.dll")] static extern bool SetCursorPos(int x, int y);
         [DllImport("user32.dll")] static extern void mouse_event(uint f, uint dx, uint dy, uint d, UIntPtr e);
+        [DllImport("user32.dll")] static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, UIntPtr dwExtraInfo);
+        [DllImport("user32.dll")] static extern short VkKeyScan(char ch);
 
         struct RECT { public int L, T, R, B; }
+
+        const uint KEYEVENTF_KEYUP = 0x0002;
+
+        // Virtual-Key codes
+        public const byte VK_SPACE = 0x20;
+        public const byte VK_RETURN = 0x0D;
+        public const byte VK_ESCAPE = 0x1B;
 
         // Базовые координаты UI в макете 1920x1080
         public const int BaseMenuBenchX = 150, BaseMenuBenchY = 485;   // "Тест быстродействия"
@@ -43,6 +52,32 @@ namespace BMWBenchmarkLoader
             System.Threading.Thread.Sleep(60);
             mouse_event(0x0004, 0, 0, 0, UIntPtr.Zero);
             Console.WriteLine("    [ui] click " + baseX + "," + baseY + " -> screen " + ax + "," + ay);
+        }
+
+        /// <summary>
+        /// Нажатие клавиши (keydown + keyup). Окно игры должно быть на переднем плане.
+        /// </summary>
+        public static void PressKey(IntPtr hwnd, byte vk)
+        {
+            if (hwnd != IntPtr.Zero)
+            {
+                SetForegroundWindow(hwnd);
+                System.Threading.Thread.Sleep(150);
+            }
+            keybd_event(vk, 0, 0, UIntPtr.Zero);
+            System.Threading.Thread.Sleep(50);
+            keybd_event(vk, 0, KEYEVENTF_KEYUP, UIntPtr.Zero);
+            Console.WriteLine("    [ui] key 0x" + vk.ToString("X2"));
+        }
+
+        /// <summary>
+        /// «Нажмите любую клавишу» — Space, затем Enter на всякий случай.
+        /// </summary>
+        public static void PressAnyKey(IntPtr hwnd)
+        {
+            PressKey(hwnd, VK_SPACE);
+            System.Threading.Thread.Sleep(200);
+            PressKey(hwnd, VK_RETURN);
         }
     }
 }
