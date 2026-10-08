@@ -71,7 +71,7 @@ namespace BMWBenchmarkLoader
                 while (DateTime.UtcNow < dl && Process.GetProcessesByName("steam").Length == 0) Thread.Sleep(2000);
             }
             var steamExe = Path.Combine(_cfg.SteamPath, "steam.exe");
-            // -novid пропускает вступительную катсцену, -useallavailablecores задаействует все ядра,
+            // -novid пропускает вступительную катсцену, -useallavailablecores задействует все ядра,
             // -high повышает приоритет процесса (усиливает CPU-нагрузку в CPU-тесте)
             var gameArgs = "-applaunch 3132990 -novid -useallavailablecores" + (highPriority ? " -high" : "");
             var deadline = DateTime.UtcNow.AddMinutes(5);
@@ -102,7 +102,7 @@ namespace BMWBenchmarkLoader
                 {
                     var png = ScreenCaptor.Capture(hwnd, Path.Combine(_workDir, "probe_menu.png"));
                     var text = OcrRunner.WordsToText(OcrRunner.RunWords(png, _workDir));
-                    if (text.Contains("Тест быстродействия") || text.Contains("быстродействия"))
+                    if (IsMainMenu(text))
                         return;
                 }
                 catch { }
@@ -130,7 +130,8 @@ namespace BMWBenchmarkLoader
                 {
                     var png = ScreenCaptor.Capture(hwnd, Path.Combine(_workDir, "probe_confirm.png"));
                     var text = OcrRunner.WordsToText(OcrRunner.RunWords(png, _workDir));
-                    if (text.Contains("Хотите запустить"))
+                    if (Norm(text).Contains("хотитезапустить") || Norm(text).Contains("подтвердить") ||
+                        Norm(text).Contains("wanttostart") || Norm(text).Contains("confirm"))
                     {
                         UiDriver.Click(hwnd, UiDriver.BaseConfirmX, UiDriver.BaseConfirmY);
                         clicked = true;
@@ -149,43 +150,74 @@ namespace BMWBenchmarkLoader
             Thread.Sleep(2000);
         }
 
-string WaitResultsScreen(string shotPrefix)
+        string WaitResultsScreen(string shotPrefix)
         {
             // первые 60 секунд — загрузка уровня/катсцена, результаты не могут появиться
             Thread.Sleep(60000);
             var deadline = DateTime.UtcNow.AddMinutes(20);
             int stableHits = 0;
             int probeCount = 0;
+            int noWindowStreak = 0;
+
             while (DateTime.UtcNow < deadline)
             {
                 Thread.Sleep(8000);
+
+                // игра упала / закрылась — выходим, чтобы RunBenchmarkOnce перезапустил
+                if (Process.GetProcessesByName("b1-Win64-Shipping").Length == 0)
+                {
+                    noWindowStreak++;
+                    Console.WriteLine("  [probe] процесс игры не найден (streak " + noWindowStreak + ")");
+                    if (noWindowStreak >= 2)
+                    {
+                        Console.WriteLine("  [probe] игра завершилась досрочно");
+                        return null;
+                    }
+                    continue;
+                }
+                noWindowStreak = 0;
+
                 var hwnd = UiDriver.GetGameWindow("b1-Win64-Shipping");
-                if (hwnd == IntPtr.Zero) continue;
+                if (hwnd == IntPtr.Zero)
+                {
+                    Console.WriteLine("  [probe] окно игры не найдено");
+                    continue;
+                }
+
                 try
                 {
                     probeCount++;
                     var png = ScreenCaptor.Capture(hwnd, Path.Combine(_workDir, "probe_result.png"));
+                    // сохраняем копию каждой пробы для отладки
+                    try
+                    {
+                        File.Copy(png, Path.Combine(_workDir, "probe_result_" + probeCount + ".png"), true);
+                    }
+                    catch { }
+
                     var words = OcrRunner.RunWords(png, _workDir);
                     var text = OcrRunner.WordsToText(words);
-                    Console.WriteLine("  [probe" + probeCount + "] OCR: " + text);
-                    // Логируем прогресс каждые 5 проб
-                    if (probeCount % 5 == 0)
-                    {
-                        var preview = text.Replace("\n", " | ").Substring(0, Math.Min(200, text.Length));
-                        Console.WriteLine("  [probe " + probeCount + "] OCR: " + preview);
-                    }
-                    
-                    if (text.Contains("Результаты теста") || text.Contains("В среднем") || text.Contains("FPS") || text.Contains("фпс"))
+                    var norm = Norm(text);
+
+                    // короткий лог каждый раз
+                    var oneLine = text.Replace("\r", " ").Replace("\n", " | ");
+                    if (oneLine.Length > 180) oneLine = oneLine.Substring(0, 180) + "...";
+                    Console.WriteLine("  [probe " + probeCount + "] OCR: " + oneLine);
+
+                    if (IsResultsScreen(norm, text))
                     {
                         stableHits++;
-                        Console.WriteLine("  [probe " + probeCount + "] Результаты обнаружены (hit " + stableHits + ")");
-                        if (stableHits >= 2)
+                        Console.WriteLine("  [probe " + probeCount + "] Экран результатов обнаружен (hit " + stableHits + ")");
+                        // одного уверенного попадания достаточно
+                        if (stableHits >= 1)
                         {
-                            // финальный скриншот результатов
                             return ScreenCaptor.Capture(hwnd, Path.Combine(_workDir, shotPrefix + "_results.png"));
                         }
                     }
-                    else stableHits = 0;
+                    else
+                    {
+                        stableHits = 0;
+                    }
                 }
                 catch (Exception ex)
                 {
@@ -194,12 +226,62 @@ string WaitResultsScreen(string shotPrefix)
             }
             throw new Exception("Экран результатов не обнаружен за 20 минут");
         }
-                    }
-                    else stableHits = 0;
-                }
-                catch { }
+
+        // --- эвристики распознавания UI ---
+
+        static string Norm(string s)
+        {
+            if (string.IsNullOrEmpty(s)) return "";
+            s = s.ToLowerInvariant();
+            // убираем пробелы, пунктуацию, типичные OCR-мусорные символы
+            var sb = new System.Text.StringBuilder(s.Length);
+            foreach (var c in s)
+            {
+                if ((c >= 'a' && c <= 'z') || (c >= 'а' && c <= 'я') || (c >= '0' && c <= '9') || c == 'ё')
+                    sb.Append(c);
             }
-            throw new Exception("Экран результатов не обнаружен за 10 минут");
+            return sb.ToString();
+        }
+
+        static bool IsMainMenu(string text)
+        {
+            var n = Norm(text);
+            return n.Contains("тестбыстродействия")
+                || n.Contains("быстродействия")
+                || n.Contains("performancetest")
+                || n.Contains("benchmark")
+                || n.Contains("настройки")
+                || n.Contains("settings");
+        }
+
+        static bool IsResultsScreen(string norm, string raw)
+        {
+            // сильные маркеры заголовка / блоков результатов
+            if (norm.Contains("результатытеста") || norm.Contains("результаттеста"))
+                return true;
+            if (norm.Contains("testresults") || norm.Contains("benchmarkresults"))
+                return true;
+
+            // «В среднем» / average
+            if (norm.Contains("всреднем") || norm.Contains("average") || norm.Contains("avgfps"))
+                return true;
+
+            // несколько ключевых подписей сразу
+            int hits = 0;
+            if (norm.Contains("максимум") || norm.Contains("maximum") || norm.Contains("maxfps")) hits++;
+            if (norm.Contains("минимум") || norm.Contains("minimum") || norm.Contains("minfps")) hits++;
+            if (norm.Contains("перцентиль") || norm.Contains("percentile") || norm.Contains("5й")) hits++;
+            if (norm.Contains("видеопамят") || norm.Contains("vram")) hits++;
+            if (norm.Contains("fps") || norm.Contains("фпс")) hits++;
+            if (hits >= 2) return true;
+
+            // fallback: в сыром тексте явно есть FPS и хотя бы одна типичная подпись
+            var lower = (raw ?? "").ToLowerInvariant();
+            if ((lower.Contains("fps") || lower.Contains("фпс")) &&
+                (lower.Contains("средн") || lower.Contains("макс") || lower.Contains("мин") || lower.Contains("avg")))
+                return true;
+
+            return false;
         }
     }
 }

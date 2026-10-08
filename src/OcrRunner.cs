@@ -1,5 +1,8 @@
 using System;
 using System.Collections.Generic;
+using System.Drawing;
+using System.Drawing.Drawing2D;
+using System.Drawing.Imaging;
 using System.IO;
 using System.Text;
 
@@ -12,9 +15,7 @@ namespace BMWBenchmarkLoader
     }
 
     /// <summary>
-    /// OCR через Windows.Media.Ocr (WinRT). Выполняется системным PowerShell 5.1,
-    /// который имеет встроенную поддержку WinRT без Windows SDK.
-    /// Возвращает слова с координатами (раскладка экрана результатов фиксирована).
+    /// OCR через Windows.Media.Ocr (WinRT). Выполняется системным PowerShell 5.1.
     /// </summary>
     public static class OcrRunner
     {
@@ -80,6 +81,54 @@ if ($OutFile -ne '') { Set-Content -LiteralPath $OutFile -Value $sb.ToString() -
                     throw new Exception("OCR не выполнен: " + (se.Length > 0 ? se : so));
             }
 
+            return ParseOutFile(outFile);
+        }
+
+        /// <summary>
+        /// OCR вырезанной зоны с апскейлом — для стилизованных цифр (среднее FPS, VRAM).
+        /// Координаты в пикселях исходного изображения.
+        /// </summary>
+        public static List<OcrWord> RunWordsRegion(string pngPath, string workDir, int x, int y, int w, int h, int scale = 3, string tag = "crop")
+        {
+            if (w <= 0 || h <= 0) return new List<OcrWord>();
+
+            string cropPath = Path.Combine(workDir, "ocr_crop_" + tag + ".png");
+            using (var src = new Bitmap(pngPath))
+            {
+                // кламп к границам
+                if (x < 0) { w += x; x = 0; }
+                if (y < 0) { h += y; y = 0; }
+                if (x + w > src.Width) w = src.Width - x;
+                if (y + h > src.Height) h = src.Height - y;
+                if (w <= 2 || h <= 2) return new List<OcrWord>();
+
+                using (var crop = src.Clone(new Rectangle(x, y, w, h), src.PixelFormat))
+                using (var up = new Bitmap(w * scale, h * scale))
+                using (var g = Graphics.FromImage(up))
+                {
+                    g.InterpolationMode = InterpolationMode.HighQualityBicubic;
+                    g.PixelOffsetMode = PixelOffsetMode.HighQuality;
+                    g.DrawImage(crop, 0, 0, up.Width, up.Height);
+
+                    // лёгкое усиление контраста: рисуем на белый фон уже есть из UI
+                    up.Save(cropPath, ImageFormat.Png);
+                }
+            }
+
+            var words = RunWords(cropPath, workDir);
+            // переводим координаты обратно в систему исходного кадра
+            foreach (var word in words)
+            {
+                word.X = word.X / scale + x;
+                word.Y = word.Y / scale + y;
+                word.W = word.W / scale;
+                word.H = word.H / scale;
+            }
+            return words;
+        }
+
+        static List<OcrWord> ParseOutFile(string outFile)
+        {
             var words = new List<OcrWord>();
             foreach (var raw in File.ReadAllLines(outFile, Encoding.UTF8))
             {

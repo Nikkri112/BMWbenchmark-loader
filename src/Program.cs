@@ -31,11 +31,12 @@ namespace BMWBenchmarkLoader
             if (opts.OcrTestFile != null)
             {
                 int tw, th; ScreenCaptor.GetSize(opts.OcrTestFile, out tw, out th);
-                var r = BenchResult.Parse(OcrRunner.RunWords(opts.OcrTestFile, workDir), tw, th);
+                var r = BenchResult.Parse(OcrRunner.RunWords(opts.OcrTestFile, workDir), tw, th, opts.OcrTestFile, workDir);
                 Console.WriteLine(r.RawOcr);
                 Console.WriteLine();
                 Console.WriteLine("--- parsed ---");
                 Console.WriteLine(r.Format("OCR-тест"));
+                Console.WriteLine("IsValid: " + r.IsValid);
                 return 0;
             }
 
@@ -65,52 +66,97 @@ namespace BMWBenchmarkLoader
                 BenchResult gpuResult = null;
                 string cpuDesc = null;
                 string gpuDesc = null;
+                string cpuError = null;
+                string gpuError = null;
 
                 var runner = new GameRunner(cfg, workDir);
 
                 if (!opts.GpuOnly)
                 {
                     Console.WriteLine("[3/6] CPU-тест: применение настроек (нагрузка на CPU, минимум GPU)...");
-                    runner.KillGame();
-                    cfg.ApplyCpuProfile();
-                    cfg.Save();
-                    cpuDesc = cfg.DescribeProfile("CPU-тест");
-                    Console.WriteLine(cpuDesc);
-                    runner.RunBenchmarkOnce("CPU", "cpu");
-                    var lastPng = Path.Combine(workDir, "cpu_results.png");
-                    int cw, ch; ScreenCaptor.GetSize(lastPng, out cw, out ch);
-                    cpuResult = BenchResult.Parse(OcrRunner.RunWords(lastPng, workDir), cw, ch);
-                    Console.WriteLine(cpuResult.Format("CPU-тест — результат"));
+                    try
+                    {
+                        runner.KillGame();
+                        cfg.ApplyCpuProfile();
+                        cfg.Save();
+                        cpuDesc = cfg.DescribeProfile("CPU-тест");
+                        Console.WriteLine(cpuDesc);
+                        runner.RunBenchmarkOnce("CPU", "cpu");
+                        var lastPng = Path.Combine(workDir, "cpu_results.png");
+                        if (File.Exists(lastPng))
+                        {
+                            int cw, ch; ScreenCaptor.GetSize(lastPng, out cw, out ch);
+                            cpuResult = BenchResult.Parse(OcrRunner.RunWords(lastPng, workDir), cw, ch, lastPng, workDir);
+                            Console.WriteLine(cpuResult.Format("CPU-тест — результат"));
+                            if (!cpuResult.IsValid)
+                            {
+                                Console.WriteLine("  [!] CPU: не все поля распознаны. Сырой OCR:");
+                                Console.WriteLine(cpuResult.RawOcr);
+                            }
+                        }
+                        else
+                        {
+                            cpuError = "файл cpu_results.png не создан";
+                            Console.WriteLine("  [!] " + cpuError);
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        cpuError = ex.Message;
+                        Console.WriteLine("  [!] CPU-тест ошибка: " + ex.Message);
+                    }
                     Console.WriteLine();
                 }
 
                 if (!opts.CpuOnly)
                 {
                     Console.WriteLine("[4/6] GPU-тест: применение настроек (максимальная нагрузка на GPU)...");
-                    runner.KillGame();
-                    cfg.ApplyGpuProfile();
-                    cfg.Save();
-                    gpuDesc = cfg.DescribeProfile("GPU-тест");
-                    Console.WriteLine(gpuDesc);
-                    runner.RunBenchmarkOnce("GPU", "gpu");
-                    var lastPng = Path.Combine(workDir, "gpu_results.png");
-                    int gw, gh; ScreenCaptor.GetSize(lastPng, out gw, out gh);
-                    gpuResult = BenchResult.Parse(OcrRunner.RunWords(lastPng, workDir), gw, gh);
-                    Console.WriteLine(gpuResult.Format("GPU-тест — результат"));
+                    try
+                    {
+                        runner.KillGame();
+                        cfg.ApplyGpuProfile();
+                        cfg.Save();
+                        gpuDesc = cfg.DescribeProfile("GPU-тест");
+                        Console.WriteLine(gpuDesc);
+                        runner.RunBenchmarkOnce("GPU", "gpu");
+                        var lastPng = Path.Combine(workDir, "gpu_results.png");
+                        if (File.Exists(lastPng))
+                        {
+                            int gw, gh; ScreenCaptor.GetSize(lastPng, out gw, out gh);
+                            gpuResult = BenchResult.Parse(OcrRunner.RunWords(lastPng, workDir), gw, gh, lastPng, workDir);
+                            Console.WriteLine(gpuResult.Format("GPU-тест — результат"));
+                            if (!gpuResult.IsValid)
+                            {
+                                Console.WriteLine("  [!] GPU: не все поля распознаны. Сырой OCR:");
+                                Console.WriteLine(gpuResult.RawOcr);
+                            }
+                        }
+                        else
+                        {
+                            gpuError = "файл gpu_results.png не создан";
+                            Console.WriteLine("  [!] " + gpuError);
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        gpuError = ex.Message;
+                        Console.WriteLine("  [!] GPU-тест ошибка: " + ex.Message);
+                    }
                     Console.WriteLine();
                 }
 
                 Console.WriteLine("[5/6] Восстановление исходных настроек...");
-                runner.KillGame();
-                cfg.RestoreOriginal();
+                try { runner.KillGame(); } catch { }
+                try { cfg.RestoreOriginal(); } catch { }
                 Console.WriteLine();
 
                 Console.WriteLine("[6/6] Отчёт...");
                 var reportPath = opts.OutPath ?? Path.Combine(Directory.GetCurrentDirectory(), "BMWbenchmark_report_" + stamp + ".txt");
-                var report = BuildReport(specs, cpuResult, gpuResult, cpuDesc, gpuDesc, stamp);
+                var report = BuildReport(specs, cpuResult, gpuResult, cpuDesc, gpuDesc, stamp, cpuError, gpuError);
                 File.WriteAllText(reportPath, report, new UTF8Encoding(false));
                 Console.WriteLine(report);
                 Console.WriteLine("Отчёт сохранён: " + reportPath);
+                Console.WriteLine("Скриншоты: " + workDir);
                 return 0;
             }
             catch (Exception ex)
@@ -125,7 +171,8 @@ namespace BMWBenchmarkLoader
             }
         }
 
-        static string BuildReport(SystemSpecs specs, BenchResult cpu, BenchResult gpu, string cpuDesc, string gpuDesc, string stamp)
+        static string BuildReport(SystemSpecs specs, BenchResult cpu, BenchResult gpu,
+            string cpuDesc, string gpuDesc, string stamp, string cpuError, string gpuError)
         {
             var sb = new StringBuilder();
             sb.AppendLine("======================================================================");
@@ -138,11 +185,29 @@ namespace BMWBenchmarkLoader
             sb.AppendLine();
             sb.AppendLine("--- РЕЗУЛЬТАТ CPU-ТЕСТА (нагрузка на процессор) ----------------------");
             if (cpu != null && cpu.IsValid) sb.AppendLine(cpu.Format("CPU"));
-            else sb.AppendLine("  нет данных");
+            else if (cpu != null)
+            {
+                sb.AppendLine(cpu.Format("CPU (частично)"));
+                if (!string.IsNullOrEmpty(cpu.RawOcr))
+                {
+                    sb.AppendLine("  --- сырой OCR ---");
+                    sb.AppendLine(cpu.RawOcr);
+                }
+            }
+            else sb.AppendLine("  нет данных" + (cpuError != null ? " (" + cpuError + ")" : ""));
             sb.AppendLine();
             sb.AppendLine("--- РЕЗУЛЬТАТ GPU-ТЕСТА (максимальная нагрузка на видеокарту) --------");
             if (gpu != null && gpu.IsValid) sb.AppendLine(gpu.Format("GPU"));
-            else sb.AppendLine("  нет данных");
+            else if (gpu != null)
+            {
+                sb.AppendLine(gpu.Format("GPU (частично)"));
+                if (!string.IsNullOrEmpty(gpu.RawOcr))
+                {
+                    sb.AppendLine("  --- сырой OCR ---");
+                    sb.AppendLine(gpu.RawOcr);
+                }
+            }
+            else sb.AppendLine("  нет данных" + (gpuError != null ? " (" + gpuError + ")" : ""));
             sb.AppendLine();
             sb.AppendLine("--- НАСТРОЙКИ CPU-ТЕСТА ----------------------------------------------");
             sb.AppendLine("  (минимальный рендер-скейл и GPU-эффекты, максимальная дальность");
